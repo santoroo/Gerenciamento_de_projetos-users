@@ -1,693 +1,335 @@
-# Project and User Management Microservice
+# Módulo: Gerenciamento de Projetos e Usuários
 
-A high-performance FastAPI backend microservice featuring AI-driven project recommendations, Role-Based Access Control (RBAC), and comprehensive team/project management.
+Microsserviço da **Plataforma de Documentação Inteligente de Projetos de
+Engenharia de Software** (UPM — Engenharia de Software). Este módulo é a porta
+de entrada do sistema: autentica usuários, controla papéis (RBAC), gerencia
+equipes e projetos e oferece recomendações por IA com base no histórico de
+atividades.
 
-## Features
-
-✅ **User & Access Control (RBAC)**
-- Three roles: Admin, Manager, Contributor
-- Fine-grained permission checks on all endpoints
-- Secure role-based authorization
-
-✅ **Team Management**
-- Create and manage teams
-- Add/remove team members
-- Team ownership and membership tracking
-
-✅ **Project Management**
-- Create projects linked to teams or individual users
-- Complex RBAC validation for project access
-- Project member management with roles (admin, editor, viewer, contributor)
-- Tag-based metadata for AI recommendations
-
-✅ **AI-Driven Recommendations**
-- Content-based filtering using TF-IDF vectorization
-- Cosine similarity for project relevance scoring
-- Analyzes 90-day user activity history
-- Excludes already-assigned projects
+> **Status:** funcional, com API estável e frontend integrado.
 
 ---
 
-## Project Structure
+## Sumário
+1. [Visão geral](#visão-geral)
+2. [Stack](#stack)
+3. [Como rodar](#como-rodar)
+4. [Variáveis de ambiente](#variáveis-de-ambiente)
+5. [Estrutura do projeto](#estrutura-do-projeto)
+6. [API — referência completa](#api--referência-completa)
+7. [Integração com outros módulos](#integração-com-outros-módulos)
+8. [Funcionalidade de IA](#funcionalidade-de-ia)
+9. [Robustez](#robustez)
+
+---
+
+## Visão geral
+
+| Responsabilidade | Descrição |
+|---|---|
+| Autenticação | Cadastro e login via JWT (Bearer token), com hash de senha (bcrypt) |
+| Autorização (RBAC) | Três papéis: **admin** (Tech Lead/Arquiteto), **manager** (PM), **contributor** (Desenvolvedor) |
+| Equipes | CRUD, membros, ownership |
+| Projetos | CRUD, associação a equipes, membros com papel próprio (admin/editor/viewer/contributor) |
+| IA | Recomendação de projetos com base no histórico de atividade do usuário (TF-IDF + cosine similarity) |
+| Integração | Endpoints públicos para outros módulos validarem sessão, consultarem usuários e checarem permissões |
+
+---
+
+## Stack
+
+- **Backend:** Python 3.10+ · FastAPI · SQLAlchemy 2 (async) · Pydantic v2
+- **Auth:** PyJWT · passlib + bcrypt
+- **Banco:** SQLite (default — zero setup) · PostgreSQL suportado
+- **IA:** scikit-learn (TF-IDF + cosine similarity)
+- **Frontend:** HTML + CSS + JavaScript ES modules (sem build, sem framework) — servido pelo próprio FastAPI
+
+---
+
+## Como rodar
+
+### 1. Clone e instale
+```bash
+git clone <repo>
+cd Gerenciamento_de_projetos-users
+python -m venv .venv
+# Linux / Mac:
+source .venv/bin/activate
+# Windows (PowerShell):
+.venv\Scripts\Activate.ps1
+
+pip install -r requirements.txt
+```
+
+### 2. (Opcional) Configure o `.env`
+```bash
+cp .env.example .env     # Linux/Mac
+copy .env.example .env   # Windows
+```
+Sem `.env` os defaults rodam (SQLite + secret de dev). **Em produção, gere um `SECRET_KEY` forte.**
+
+### 3. Popule o banco com dados de exemplo
+```bash
+python -m app.scripts.seed_database
+```
+Cria 5 usuários, 3 equipes, 5 projetos e ~50 atividades. Todos com senha **`password123`**.
+
+### 4. Suba o servidor
+```bash
+uvicorn app.main:app --reload
+```
+
+Acesse:
+- **Interface web:** http://localhost:8000/
+- **Documentação interativa (Swagger):** http://localhost:8000/docs
+- **Documentação alternativa (ReDoc):** http://localhost:8000/redoc
+
+### Credenciais de teste
+| Usuário | Email | Papel | Senha |
+|---|---|---|---|
+| `admin_user` | admin@example.com | admin | `password123` |
+| `manager_alice` | alice@example.com | manager | `password123` |
+| `manager_diana` | diana@example.com | manager | `password123` |
+| `contributor_bob` | bob@example.com | contributor | `password123` |
+| `contributor_charlie` | charlie@example.com | contributor | `password123` |
+
+---
+
+## Variáveis de ambiente
+
+| Variável | Default | Descrição |
+|---|---|---|
+| `APP_NAME` | `Project Management Microservice` | Nome do serviço |
+| `APP_VERSION` | `1.0.0` | Versão |
+| `DEBUG` | `True` | Modo debug (auto-reload, logs verbosos) |
+| `DATABASE_URL` | `sqlite+aiosqlite:///./project_management.db` | URL do banco. Para Postgres: `postgresql+asyncpg://user:pw@host:5432/db` |
+| `SQLALCHEMY_ECHO` | `False` | Loga todas as queries (útil para debug) |
+| `SECRET_KEY` | `change-me-...` | **Mude em produção!** Use `python -c "import secrets; print(secrets.token_urlsafe(64))"` |
+| `ALGORITHM` | `HS256` | Algoritmo do JWT |
+| `ACCESS_TOKEN_EXPIRE_MINUTES` | `1440` (24h) | Validade do token |
+| `HOST` | `0.0.0.0` | Bind address |
+| `PORT` | `8000` | Porta |
+| `CORS_ORIGINS` | `*` | Origens permitidas (CSV). Restrinja em produção |
+| `INGESTION_SERVICE_URL` | _(vazio)_ | URL do módulo de Ingestão (Grupo 2) |
+| `REPORTS_SERVICE_URL` | _(vazio)_ | URL do módulo de Relatórios (Grupo 3) |
+| `PRESENTATIONS_SERVICE_URL` | _(vazio)_ | URL do módulo de Apresentações (Grupo 4) |
+| `DIAGRAMS_SERVICE_URL` | _(vazio)_ | URL do módulo de Diagramas (Grupo 5) |
+| `CHAT_SERVICE_URL` | _(vazio)_ | URL do módulo de Chat IA (Grupo 6) |
+
+---
+
+## Estrutura do projeto
 
 ```
-Gerenciamento_de_projetos-users/
-├── app/
-│   ├── __init__.py
-│   ├── main.py                 # FastAPI application entry point
-│   ├── config.py               # Configuration and settings
-│   ├── database.py             # SQLAlchemy async setup
-│   │
-│   ├── models/
-│   │   └── __init__.py         # SQLAlchemy ORM models
-│   │                            # - Role, User, Team, Project
-│   │                            # - TeamMember, ProjectMember
-│   │                            # - UserActivity
-│   │
-│   ├── schemas/
-│   │   └── __init__.py         # Pydantic validation schemas
-│   │
+.
+├── app/                            # Backend (FastAPI)
+│   ├── main.py                     # entrypoint, CORS, error handlers, static
+│   ├── config.py                   # settings (lê .env)
+│   ├── database.py                 # engine async + session factory
+│   ├── models/__init__.py          # tabelas SQLAlchemy
+│   ├── schemas/__init__.py         # Pydantic v2 (request/response)
 │   ├── routes/
-│   │   ├── __init__.py
-│   │   ├── users.py            # User CRUD endpoints
-│   │   ├── teams.py            # Team management endpoints
-│   │   ├── projects.py         # Project management + RBAC logic
-│   │   └── recommendations.py  # AI recommendation endpoint
-│   │
+│   │   ├── auth.py                 # login, register, validate, me
+│   │   ├── users.py                # CRUD de usuários
+│   │   ├── teams.py                # CRUD de equipes + membros
+│   │   ├── projects.py             # CRUD de projetos + membros
+│   │   ├── recommendations.py      # IA + tracking de atividade
+│   │   └── integration.py          # endpoints para os outros módulos
 │   ├── services/
-│   │   ├── __init__.py
-│   │   ├── rbac.py             # RBAC service & permission checks
-│   │   └── recommendations.py  # AI recommendation engine
-│   │
-│   ├── middleware/
-│   │   └── __init__.py         # Future: JWT auth middleware
-│   │
-│   └── utils/
-│       ├── __init__.py
-│       └── dependencies.py     # FastAPI dependency injection
-│
-├── requirements.txt            # Python dependencies
-├── .env.example               # Environment variables template
+│   │   ├── rbac.py                 # checagens de permissão dependentes de recurso
+│   │   └── recommendations.py      # motor TF-IDF
+│   ├── utils/
+│   │   ├── dependencies.py         # get_current_user, require_admin, etc.
+│   │   └── security.py             # hash_password, JWT
+│   └── scripts/seed_database.py    # popular dados de exemplo
+├── frontend/                       # SPA HTML+JS vanilla
+│   ├── index.html
+│   └── assets/
+│       ├── styles.css
+│       ├── api.js                  # wrapper fetch + auth
+│       └── app.js                  # SPA (roteamento, views)
+├── requirements.txt
+├── .env.example
 └── README.md
 ```
 
 ---
 
-## Installation & Setup
+## API — referência completa
 
-### Prerequisites
-- Python 3.10+
-- PostgreSQL 12+ (or another SQLAlchemy-supported DB)
-- pip/poetry for dependency management
+> Convenções:
+> - Todos os endpoints (exceto `/health`, `/api/auth/register`, `/api/auth/login` e `/api/integration/config`) exigem `Authorization: Bearer <token>`.
+> - Códigos HTTP: `200/201/204` sucesso · `400` payload inválido · `401` não autenticado · `403` sem permissão · `404` não encontrado · `409` conflito (duplicidade) · `422` validação · `503` banco indisponível.
 
-### Step 1: Environment Setup
+### 🔐 Autenticação — `/api/auth`
 
+| Método | Rota | Descrição | Auth |
+|---|---|---|---|
+| `POST` | `/api/auth/register` | Auto-registro público. Sempre cria como `contributor`. Retorna token. | público |
+| `POST` | `/api/auth/login` | Login JSON (`username_or_email` + `password`). Retorna token. | público |
+| `GET` | `/api/auth/me` | Dados do usuário autenticado. | bearer |
+| `GET` | `/api/auth/validate` | **Para outros módulos:** valida um token. Sempre retorna 200 (`{valid: bool, ...}`). | bearer |
+
+**Exemplo — login:**
 ```bash
-# Clone/navigate to project
-cd Gerenciamento_de_projetos-users
-
-# Create virtual environment
-python -m venv venv
-source venv/bin/activate  # On Windows: venv\Scripts\activate
-
-# Install dependencies
-pip install -r requirements.txt
-```
-
-### Step 2: Database Configuration
-
-```bash
-# Copy environment template
-cp .env.example .env
-
-# Edit .env with your database credentials
-# Example for PostgreSQL:
-# DATABASE_URL=postgresql+asyncpg://user:password@localhost:5432/project_management_db
-```
-
-### Step 3: Run Application
-
-```bash
-# Start the server
-python -m app.main
-
-# Or using uvicorn directly
-uvicorn app.main:app --reload --host 0.0.0.0 --port 8000
-
-# Access API documentation
-# Swagger UI: http://localhost:8000/docs
-# ReDoc:      http://localhost:8000/redoc
-```
-
----
-
-## Database Schema
-
-### Models Overview
-
-#### **Role**
-```
-id (PK)          - Integer
-name             - String (unique) - admin, manager, contributor
-description      - Text
-created_at       - DateTime
-```
-
-#### **User**
-```
-id (PK)          - Integer
-username         - String (unique)
-email            - String (unique)
-hashed_password  - String
-full_name        - String
-is_active        - Boolean (default: True)
-role_id (FK)     - Integer -> Role.id
-created_at       - DateTime
-updated_at       - DateTime
-```
-
-#### **Team**
-```
-id (PK)          - Integer
-name             - String
-description      - Text
-owner_id (FK)    - Integer -> User.id
-is_active        - Boolean (default: True)
-created_at       - DateTime
-updated_at       - DateTime
-```
-
-#### **TeamMember** (Junction Table)
-```
-id (PK)          - Integer
-team_id (FK)     - Integer -> Team.id
-user_id (FK)     - Integer -> User.id
-joined_at        - DateTime
-```
-
-#### **Project**
-```
-id (PK)          - Integer
-name             - String
-description      - Text
-team_id (FK)     - Integer -> Team.id (nullable)
-owner_id (FK)    - Integer -> User.id
-tags             - String (comma-separated for AI)
-is_active        - Boolean (default: True)
-created_at       - DateTime
-updated_at       - DateTime
-```
-
-#### **ProjectMember** (Junction Table)
-```
-id (PK)          - Integer
-project_id (FK)  - Integer -> Project.id
-user_id (FK)     - Integer -> User.id
-role             - String (admin, editor, viewer, contributor)
-joined_at        - DateTime
-```
-
-#### **UserActivity** (For AI Recommendations)
-```
-id (PK)          - Integer
-user_id (FK)     - Integer -> User.id
-project_id (FK)  - Integer -> Project.id (nullable)
-activity_type    - String (view, comment, edit, assign, etc.)
-tags             - String (comma-separated activity tags)
-metadata         - Text (JSON-like additional info)
-timestamp        - DateTime
-```
-
----
-
-## API Endpoints
-
-### Authentication Headers
-In production, include JWT token:
-```
-Authorization: Bearer <jwt_token>
-```
-
-Current implementation uses simple user_id parameter for demo purposes.
-
-### Users
-
-#### Create User (Admin only)
-```http
-POST /api/users
-Content-Type: application/json
-
-{
-  "username": "john_doe",
-  "email": "john@example.com",
-  "password": "securepassword123",
-  "full_name": "John Doe",
-  "role_id": 2
-}
-```
-
-#### List Users
-```http
-GET /api/users?skip=0&limit=100
-```
-
-#### Get User Details
-```http
-GET /api/users/{user_id}
-```
-
-#### Update User
-```http
-PUT /api/users/{user_id}
-Content-Type: application/json
-
-{
-  "full_name": "Updated Name",
-  "is_active": true
-}
-```
-
-#### Delete User (Soft-delete)
-```http
-DELETE /api/users/{user_id}
-```
-
----
-
-### Teams
-
-#### Create Team
-```http
-POST /api/teams?owner_id=1
-Content-Type: application/json
-
-{
-  "name": "Backend Team",
-  "description": "Handles all backend services"
-}
-```
-
-#### List Teams
-```http
-GET /api/teams?skip=0&limit=100
-```
-
-#### Get Team Details
-```http
-GET /api/teams/{team_id}
-```
-
-#### Update Team (Team owner or admin only)
-```http
-PUT /api/teams/{team_id}?current_user_id=1
-Content-Type: application/json
-
-{
-  "name": "Updated Team Name",
-  "description": "Updated description"
-}
-```
-
-#### Add Team Member (Team owner or admin only)
-```http
-POST /api/teams/{team_id}/members/{user_id}?current_user_id=1
-```
-
-#### Remove Team Member
-```http
-DELETE /api/teams/{team_id}/members/{user_id}?current_user_id=1
-```
-
----
-
-### Projects
-
-#### Create Project (Complex RBAC Example)
-```http
-POST /api/projects?owner_id=1
-Content-Type: application/json
-
-{
-  "name": "E-Commerce Platform",
-  "description": "Main e-commerce project",
-  "team_id": 1,
-  "tags": "backend,database,api,python,fastapi"
-}
-```
-
-**RBAC Logic Applied:**
-1. Verifies owner_id is a Manager or Admin
-2. If team_id provided:
-   - Verifies team exists
-   - Verifies user has access to team
-3. Creates project
-4. Automatically adds owner as project member with admin role
-
-#### List Projects
-```http
-GET /api/projects?skip=0&limit=100
-```
-
-#### Get Project Details
-```http
-GET /api/projects/{project_id}
-```
-
-#### Update Project (Owner or Admin only)
-```http
-PUT /api/projects/{project_id}?current_user_id=1
-Content-Type: application/json
-
-{
-  "name": "Updated Project Name",
-  "tags": "updated,tags,here"
-}
-```
-
-#### Add Project Member (Project admin only)
-```http
-POST /api/projects/{project_id}/members/{user_id}?current_user_id=1&role=contributor
-```
-
-Available roles: `admin`, `editor`, `viewer`, `contributor`
-
-#### Remove Project Member
-```http
-DELETE /api/projects/{project_id}/members/{user_id}?current_user_id=1
-```
-
----
-
-### AI Recommendations
-
-#### Get Project Recommendations for User
-```http
-GET /api/recommendations/users/{user_id}?top_k=5
-```
-
-**Response:**
-```json
-{
-  "user_id": 1,
-  "recommendations": [
-    {
-      "project_id": 5,
-      "project_name": "Data Analytics Dashboard",
-      "description": "Real-time analytics",
-      "similarity_score": 0.85,
-      "reason": "Matches your interests in: database, analytics, python"
-    },
-    {
-      "project_id": 8,
-      "project_name": "Machine Learning Pipeline",
-      "description": "ML model training",
-      "similarity_score": 0.72,
-      "reason": "Matches your interests in: machine-learning, python, data"
-    }
-  ],
-  "generated_at": "2024-01-15T10:30:00"
-}
-```
-
----
-
-## RBAC (Role-Based Access Control)
-
-### Roles
-
-1. **Admin**
-   - Can perform all operations
-   - Can create other users
-   - Can manage all teams and projects
-   - Highest privilege level
-
-2. **Manager**
-   - Can create projects and teams
-   - Can manage teams they own
-   - Can manage projects they own
-   - Cannot manage other users
-
-3. **Contributor**
-   - Can view projects they're assigned to
-   - Can create personal projects
-   - Read-only access to shared resources
-
-### RBAC Service Functions
-
-```python
-# Check if user has specific role
-await RBACService.check_user_role(
-    user_id=1, 
-    required_roles=["admin", "manager"], 
-    db=db
-)
-
-# Ensure user is admin (raises HTTPException if not)
-await RBACService.ensure_admin(user_id=1, db=db)
-
-# Ensure user is manager or admin
-await RBACService.ensure_manager_or_admin(user_id=1, db=db)
-
-# Verify project access
-await RBACService.verify_project_access(
-    user_id=1, 
-    project_id=5, 
-    db=db
-)
-
-# Verify team access
-await RBACService.verify_team_access(
-    user_id=1, 
-    team_id=3, 
-    db=db
-)
-```
-
----
-
-## AI Recommendation Algorithm
-
-### Overview
-
-The recommendation engine uses **Content-Based Filtering** with TF-IDF vectorization and cosine similarity to suggest relevant projects to users based on their activity profile.
-
-### Algorithm Steps
-
-#### 1. Build User Activity Profile
-```python
-async def get_user_activity_profile(user_id, db, days=90):
-    """
-    - Retrieves all user activities from last 90 days
-    - Aggregates tags from activities
-    - Returns normalized tag list and activity metadata
-    """
-```
-
-**Example Profile:**
-```python
-{
-    "tags": ["database", "api", "python", "backend", "sql"],
-    "activity_count": 42,
-    "activity_types": {
-        "view": 15,
-        "edit": 12,
-        "comment": 10,
-        "assign": 5
-    },
-    "profile_text": "database api python backend sql"
-}
-```
-
-#### 2. Get Available Projects
-```python
-async def get_available_projects(user_id, db, exclude_existing=True):
-    """
-    - Fetches all active projects
-    - Excludes projects user is already member of
-    - Returns project metadata with normalized text
-    """
-```
-
-#### 3. TF-IDF Vectorization
-```python
-# Create document vectors from text
-vectorizer = TfidfVectorizer(
-    lowercase=True,
-    stop_words="english",
-    ngram_range=(1, 2),      # Unigrams and bigrams
-    max_features=100
-)
-tfidf_matrix = vectorizer.fit_transform(documents)
-```
-
-#### 4. Cosine Similarity Calculation
-```python
-# Calculate similarity between user profile and each project
-similarities = cosine_similarity(user_vector, project_vectors)
-
-# Results in scores between 0.0 and 1.0
-# 1.0 = perfect match, 0.0 = no similarity
-```
-
-#### 5. Ranking and Filtering
-```python
-# Filter by minimum similarity (default: 0.1)
-# Sort by similarity score (highest first)
-# Return top-K recommendations (default: 5)
-recommendations = sorted(recommendations, key=lambda x: x[1], reverse=True)[:top_k]
-```
-
-### Example Recommendation Scenario
-
-**User Profile (90-day activity):**
-- Tags: `["backend", "api", "python", "database", "fastapi"]`
-- Recent activities: Edited 12 documents, viewed 15 projects, assigned to 3 projects
-
-**Available Projects:**
-1. "Frontend Dashboard" - Tags: `"react,javascript,ui"`
-   - Similarity: 0.05 (LOW - different tech stack)
-
-2. "Data Analytics Service" - Tags: `"python,database,analytics,sql"`
-   - Similarity: 0.82 (HIGH - overlaps in python, database)
-
-3. "API Gateway" - Tags: `"fastapi,python,backend,microservices"`
-   - Similarity: 0.91 (VERY HIGH - strong match)
-
-4. "Mobile App" - Tags: `"flutter,mobile,ui"`
-   - Similarity: 0.02 (VERY LOW - completely different)
-
-**Top-K Recommendations (k=3):**
-```
-1. API Gateway (0.91)
-2. Data Analytics Service (0.82)
-```
-
----
-
-## Extending the System
-
-### Adding New Recommendation Strategy
-
-```python
-# In app/services/recommendations.py
-
-class RecommendationService:
-    @staticmethod
-    async def collaborative_filtering_recommendations(user_id, db, top_k=5):
-        """
-        Alternative: Collaborative Filtering
-        Find users similar to target user
-        Recommend projects liked by similar users
-        """
-        pass
-    
-    @staticmethod
-    async def hybrid_recommendations(user_id, db, top_k=5):
-        """
-        Combine content-based and collaborative approaches
-        """
-        pass
-```
-
-### Adding JWT Authentication
-
-```python
-# In app/middleware/auth.py
-
-from fastapi import Security, HTTPBearer
-from fastapi.security import HTTPBearer
-
-security = HTTPBearer()
-
-async def verify_jwt_token(credentials = Security(security)):
-    """Verify JWT token and extract user_id"""
-    pass
-```
-
----
-
-## Error Handling
-
-All endpoints return standard HTTP status codes:
-
-- **200 OK** - Successful GET request
-- **201 Created** - Successful resource creation
-- **204 No Content** - Successful deletion
-- **400 Bad Request** - Invalid input data
-- **401 Unauthorized** - Missing/invalid authentication
-- **403 Forbidden** - Insufficient permissions (RBAC)
-- **404 Not Found** - Resource doesn't exist
-- **500 Internal Server Error** - Unexpected server error
-
-Example Error Response:
-```json
-{
-  "detail": "Only project admin can add members"
-}
-```
-
----
-
-## Development & Testing
-
-### Create Sample Data
-
-```python
-# Script to populate initial roles and sample users
-# Place in app/scripts/seed.py
-
-from sqlalchemy import select
-from app.models import Role, User
-from app.database import AsyncSessionLocal
-
-async def seed_roles(db):
-    roles = ["admin", "manager", "contributor"]
-    for role_name in roles:
-        existing = await db.execute(select(Role).where(Role.name == role_name))
-        if not existing.scalar_one_or_none():
-            role = Role(name=role_name, description=f"{role_name.capitalize()} role")
-            db.add(role)
-    await db.commit()
-```
-
-### Testing Endpoints
-
-```bash
-# Test health check
-curl http://localhost:8000/health
-
-# Create user
-curl -X POST http://localhost:8000/api/users \
+curl -X POST http://localhost:8000/api/auth/login \
   -H "Content-Type: application/json" \
-  -d '{"username":"test","email":"test@example.com","password":"pass123","role_id":3}'
-
-# Get recommendations
-curl http://localhost:8000/api/recommendations/users/1?top_k=5
+  -d '{"username_or_email":"admin_user","password":"password123"}'
+```
+Resposta:
+```json
+{
+  "access_token": "eyJ...",
+  "token_type": "bearer",
+  "expires_in": 86400,
+  "user": { "id": 1, "username": "admin_user", "role": { "name": "admin" }, ... }
+}
 ```
 
+### 👥 Usuários — `/api/users`
+
+| Método | Rota | Descrição | Auth / Papel |
+|---|---|---|---|
+| `POST` | `/api/users/` | Cria usuário com papel explícito. | admin |
+| `GET` | `/api/users/` | Lista usuários (paginação `?skip=&limit=`). | autenticado |
+| `GET` | `/api/users/{id}` | Detalhe (inclui papel). | autenticado |
+| `PUT` | `/api/users/{id}` | Atualiza. Próprio usuário ou admin. Só admin pode mudar `role_id`/`is_active`. | autenticado |
+| `DELETE` | `/api/users/{id}` | Soft-delete (desativa). | admin |
+| `GET` | `/api/users/roles/list` | Lista papéis disponíveis. | autenticado |
+
+### 🏢 Equipes — `/api/teams`
+
+| Método | Rota | Descrição | Auth |
+|---|---|---|---|
+| `POST` | `/api/teams/` | Cria equipe (caller = owner). | manager/admin |
+| `GET` | `/api/teams/?skip=&limit=&include_inactive=` | Lista equipes. | autenticado |
+| `GET` | `/api/teams/{id}` | Detalhe com membros. | autenticado |
+| `PUT` | `/api/teams/{id}` | Atualiza. Só owner ou admin. | autenticado |
+| `DELETE` | `/api/teams/{id}` | Arquiva (soft-delete). Só owner ou admin. | autenticado |
+| `POST` | `/api/teams/{team_id}/members/{user_id}` | Adiciona membro. Só owner ou admin. | autenticado |
+| `DELETE` | `/api/teams/{team_id}/members/{user_id}` | Remove membro. Só owner ou admin. | autenticado |
+
+### 📦 Projetos — `/api/projects`
+
+| Método | Rota | Descrição | Auth |
+|---|---|---|---|
+| `POST` | `/api/projects/` | Cria projeto (caller = owner + project admin). Pode associar equipe (verifica acesso). | manager/admin |
+| `GET` | `/api/projects/?skip=&limit=&include_inactive=&mine=` | Lista projetos. `mine=true` filtra os do usuário. | autenticado |
+| `GET` | `/api/projects/{id}` | Detalhe com membros e papéis. | autenticado |
+| `PUT` | `/api/projects/{id}` | Atualiza. Só owner ou project admin (ou admin global). | autenticado |
+| `DELETE` | `/api/projects/{id}` | Arquiva. Só owner ou project admin. | autenticado |
+| `POST` | `/api/projects/{pid}/members/{uid}?role=contributor` | Adiciona membro com papel (`admin`/`editor`/`viewer`/`contributor`). | project admin |
+| `DELETE` | `/api/projects/{pid}/members/{uid}` | Remove membro. | project admin |
+
+### ✨ Recomendações por IA — `/api/recommendations`
+
+| Método | Rota | Descrição |
+|---|---|---|
+| `GET` | `/api/recommendations/me?top_k=5` | Recomendações para o próprio usuário. |
+| `GET` | `/api/recommendations/users/{id}?top_k=5` | Recomendações para outro usuário. |
+| `POST` | `/api/recommendations/activities` | Registra uma atividade (`view`/`edit`/`comment`/...) — alimenta a IA. |
+
+### 🔌 Integração entre módulos — `/api/integration`
+
+| Método | Rota | Descrição |
+|---|---|---|
+| `GET` | `/api/integration/config` | URLs públicas dos outros módulos (vem do `.env`). Usado pelo frontend para construir links. Público. |
+| `GET` | `/api/integration/users/lookup?ids=1,2,3` | **Bulk lookup** de usuários por id (até 100). Para outros módulos enriquecerem listas. |
+| `GET` | `/api/integration/projects/{pid}/access/{uid}` | Verifica se um usuário tem acesso a um projeto, retornando o papel. Para outros módulos checarem permissão antes de servir dados. |
+
+### Saúde / utilidades
+
+| Método | Rota | Descrição |
+|---|---|---|
+| `GET` | `/health` | Liveness probe. Público. |
+| `GET` | `/` | Frontend (se `frontend/` existir) ou JSON com links para docs. |
+| `GET` | `/docs`, `/redoc` | Documentação interativa (gerada pelo FastAPI). |
+
 ---
 
-## Performance Considerations
+## Integração com outros módulos
 
-1. **Database Indexing**
-   - Added indexes on: `username`, `email`, `is_active`, `tags`, `timestamp`
-   - Consider composite indexes for frequent joins
+Este módulo é a **fonte da verdade** para identidade, papéis e projetos.
+Os outros 5 grupos da plataforma podem:
 
-2. **Async Operations**
-   - All database operations are async (asyncio + asyncpg)
-   - Handles concurrent requests efficiently
+1. **Validar sessões.** Recebem um `Authorization: Bearer <token>` do frontend
+   ou de outro serviço e fazem:
+   ```http
+   GET /api/auth/validate
+   Authorization: Bearer <token>
+   ```
+   Retorna 200 com `{valid: true, user_id, role, ...}` ou `{valid: false}`.
+   Nunca lança exceção HTTP, simplificando o tratamento.
 
-3. **Caching Recommendations**
-   - Consider caching results for users with stable activity
-   - Implement Redis caching for frequently accessed data
+2. **Buscar dados de usuário.** Para popular avatares/nomes em listas:
+   ```http
+   GET /api/integration/users/lookup?ids=1,2,3
+   ```
 
-4. **Pagination**
-   - Use `skip` and `limit` parameters on list endpoints
-   - Prevents loading excessive data
+3. **Verificar acesso a projeto.** Antes de servir relatórios, diagramas, etc:
+   ```http
+   GET /api/integration/projects/{pid}/access/{uid}
+   ```
 
----
+4. **Descobrir-se mutuamente.** Cada módulo publica sua URL via `*_SERVICE_URL`
+   no `.env` deste serviço; o frontend e demais módulos as consultam em
+   `GET /api/integration/config`. URLs ausentes viram `null` (placeholder
+   desativado, não quebra o sistema).
 
-## Production Deployment Checklist
-
-- [ ] Implement JWT authentication middleware
-- [ ] Hash user passwords using bcrypt
-- [ ] Configure proper CORS origins
-- [ ] Set up database migrations (Alembic)
-- [ ] Add input validation and sanitization
-- [ ] Implement rate limiting
-- [ ] Add comprehensive logging
-- [ ] Set up monitoring and alerting
-- [ ] Configure environment-specific settings
-- [ ] Add automated testing suite
-- [ ] Implement API versioning
-- [ ] Set up CI/CD pipeline
+**Contratos estáveis:** os schemas em `/api/integration/*` são separados dos
+schemas internos (`UserMini`, `ProjectAccess`) — alterações neles são
+intencionais, garantindo que os outros grupos não quebrem com refactors aqui.
 
 ---
 
-## License
+## Funcionalidade de IA
 
-[Specify your license]
+Recomendação de projetos baseada em conteúdo:
 
-## Support
+1. **Coleta o perfil de atividade** do usuário nos últimos 90 dias (tags das
+   ações `view`/`edit`/`comment`/...).
+2. **Vetoriza** o perfil e cada projeto disponível com **TF-IDF** (uni e bigrams).
+3. **Mede similaridade** via **cosine similarity**.
+4. **Filtra e ordena** retornando os top-K mais relevantes (default 5),
+   excluindo projetos onde o usuário já é membro.
 
-For issues or questions, contact: [Your contact info]
+**Fallback graceful:**
+- Sem histórico de atividade → retorna projetos disponíveis com score 0 (para o
+  usuário ainda ter sugestões iniciais).
+- scikit-learn falha (instalação corrompida) → retorna projetos com score 0.
+- O endpoint **nunca derruba o serviço**.
+
+Atividades são gravadas automaticamente pelo frontend ao abrir um projeto, ou
+manualmente via `POST /api/recommendations/activities`.
+
+---
+
+## Robustez
+
+Princípios aplicados para que **uma falha local não derrube o sistema**:
+
+- **Handlers globais de erro** convertem qualquer exceção em JSON estruturado:
+  - `SQLAlchemyError` → `503 Database temporarily unavailable`
+  - `RequestValidationError` → `422` com detalhes
+  - `Exception` genérico → `500` com mensagem genérica (sem vazar stack trace)
+- **Banco com `pool_pre_ping`** (Postgres): conexões mortas são recicladas.
+- **JWT com expiração** e claims mínimos (`sub`, `exp`, `iss`).
+- **Senhas hasheadas com bcrypt** — nunca em texto puro.
+- **`/api/auth/validate` é tolerante a falhas:** retorna 200 com `valid:false`
+  ao invés de lançar exceção, simplificando a vida dos outros módulos.
+- **Frontend trata 401** automaticamente: limpa sessão e redireciona para
+  login.
+- **Timeouts** no cliente HTTP do frontend (15s default).
+- **Recomendador com fallback** (ver seção IA).
+- **CORS configurável** por env.
+
+---
+
+## Próximos passos sugeridos
+
+- Adicionar testes automatizados (pytest + httpx) — útil para CI.
+- Mover o seed para um endpoint admin (ou Alembic migrations) em produção.
+- Substituir `SECRET_KEY` por leitura de secret manager em produção.
+- (Opcional) Adicionar integração com LLM externo (Claude/OpenAI) para
+  recomendações mais ricas — o serviço já está estruturado para isso
+  (`source` no `RecommendationResponse`).
