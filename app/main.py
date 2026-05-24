@@ -13,7 +13,7 @@ from starlette.exceptions import HTTPException as StarletteHTTPException
 
 from app.config import settings
 from app.database import init_db
-from app.routes import auth, projects, recommendations, teams, users
+from app.routes import auth, integration, projects, recommendations, teams, users
 
 logging.basicConfig(
     level=logging.INFO,
@@ -97,6 +97,7 @@ app.include_router(users.router)
 app.include_router(teams.router)
 app.include_router(projects.router)
 app.include_router(recommendations.router)
+app.include_router(integration.router)
 
 
 # ---------------- service endpoints ----------------
@@ -108,7 +109,11 @@ async def health_check():
 
 @app.get("/api/integration/config", tags=["integration"])
 async def integration_config():
-    """Return URLs of sibling microservices so the frontend can link to them."""
+    """Return URLs of sibling microservices so the frontend can link to them.
+
+    Other modules of the platform should advertise their public base URL via
+    the corresponding ``*_SERVICE_URL`` env vars. ``null`` means the module
+    isn't deployed yet — the UI shows a disabled placeholder."""
     return {
         "this_service": {"name": settings.app_name, "version": settings.app_version},
         "modules": {
