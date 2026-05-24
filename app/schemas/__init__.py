@@ -1,9 +1,9 @@
-from pydantic import BaseModel, EmailStr, Field
+from pydantic import BaseModel, EmailStr, Field, ConfigDict
 from typing import Optional, List
 from datetime import datetime
 
 
-# ============= COMMON SCHEMAS =============
+# ============= ROLE =============
 class RoleBase(BaseModel):
     name: str
     description: Optional[str] = None
@@ -13,19 +13,25 @@ class RoleResponse(RoleBase):
     id: int
     created_at: datetime
 
-    class Config:
-        from_attributes = True
+    model_config = ConfigDict(from_attributes=True)
 
 
-# ============= USER SCHEMAS =============
+# ============= USER =============
 class UserBase(BaseModel):
     username: str = Field(..., min_length=3, max_length=100)
     email: EmailStr
     full_name: Optional[str] = None
 
 
+class UserRegister(UserBase):
+    """Public self-registration payload.
+    Role defaults to 'contributor'; only admins can create admins/managers via /users."""
+    password: str = Field(..., min_length=8, max_length=128)
+
+
 class UserCreate(UserBase):
-    password: str = Field(..., min_length=8)
+    """Admin-only creation payload."""
+    password: str = Field(..., min_length=8, max_length=128)
     role_id: int
 
 
@@ -33,6 +39,7 @@ class UserUpdate(BaseModel):
     full_name: Optional[str] = None
     email: Optional[EmailStr] = None
     is_active: Optional[bool] = None
+    role_id: Optional[int] = None
 
 
 class UserResponse(UserBase):
@@ -42,15 +49,37 @@ class UserResponse(UserBase):
     created_at: datetime
     updated_at: datetime
 
-    class Config:
-        from_attributes = True
+    model_config = ConfigDict(from_attributes=True)
 
 
 class UserDetailResponse(UserResponse):
     role: RoleResponse
 
 
-# ============= TEAM SCHEMAS =============
+# ============= AUTH =============
+class LoginRequest(BaseModel):
+    username_or_email: str = Field(..., min_length=3)
+    password: str = Field(..., min_length=1)
+
+
+class TokenResponse(BaseModel):
+    access_token: str
+    token_type: str = "bearer"
+    expires_in: int  # seconds
+    user: UserDetailResponse
+
+
+class TokenValidationResponse(BaseModel):
+    """Returned to other microservices to validate a bearer token."""
+    valid: bool
+    user_id: Optional[int] = None
+    username: Optional[str] = None
+    email: Optional[str] = None
+    role: Optional[str] = None
+    is_active: Optional[bool] = None
+
+
+# ============= TEAM =============
 class TeamBase(BaseModel):
     name: str = Field(..., min_length=1, max_length=255)
     description: Optional[str] = None
@@ -61,7 +90,7 @@ class TeamCreate(TeamBase):
 
 
 class TeamUpdate(BaseModel):
-    name: Optional[str] = None
+    name: Optional[str] = Field(None, min_length=1, max_length=255)
     description: Optional[str] = None
     is_active: Optional[bool] = None
 
@@ -70,11 +99,10 @@ class TeamMemberResponse(BaseModel):
     user_id: int
     username: str
     email: str
-    full_name: Optional[str]
+    full_name: Optional[str] = None
     joined_at: datetime
 
-    class Config:
-        from_attributes = True
+    model_config = ConfigDict(from_attributes=True)
 
 
 class TeamResponse(TeamBase):
@@ -85,15 +113,15 @@ class TeamResponse(TeamBase):
     updated_at: datetime
     members: List[TeamMemberResponse] = []
 
-    class Config:
-        from_attributes = True
+    model_config = ConfigDict(from_attributes=True)
 
 
-# ============= PROJECT SCHEMAS =============
+# ============= PROJECT =============
 class ProjectBase(BaseModel):
     name: str = Field(..., min_length=1, max_length=255)
     description: Optional[str] = None
-    tags: Optional[str] = None
+    tags: Optional[str] = Field(None, max_length=500,
+                                description="Comma-separated tags used by the AI recommender")
 
 
 class ProjectCreate(ProjectBase):
@@ -101,10 +129,11 @@ class ProjectCreate(ProjectBase):
 
 
 class ProjectUpdate(BaseModel):
-    name: Optional[str] = None
+    name: Optional[str] = Field(None, min_length=1, max_length=255)
     description: Optional[str] = None
-    tags: Optional[str] = None
+    tags: Optional[str] = Field(None, max_length=500)
     is_active: Optional[bool] = None
+    team_id: Optional[int] = None
 
 
 class ProjectMemberResponse(BaseModel):
@@ -114,8 +143,7 @@ class ProjectMemberResponse(BaseModel):
     role: str
     joined_at: datetime
 
-    class Config:
-        from_attributes = True
+    model_config = ConfigDict(from_attributes=True)
 
 
 class ProjectResponse(ProjectBase):
@@ -127,16 +155,15 @@ class ProjectResponse(ProjectBase):
     updated_at: datetime
     members: List[ProjectMemberResponse] = []
 
-    class Config:
-        from_attributes = True
+    model_config = ConfigDict(from_attributes=True)
 
 
-# ============= ACTIVITY SCHEMAS =============
+# ============= ACTIVITY =============
 class UserActivityCreate(BaseModel):
     project_id: Optional[int] = None
     activity_type: str = Field(..., min_length=1, max_length=50)
-    tags: Optional[str] = None
-    metadata: Optional[str] = None
+    tags: Optional[str] = Field(None, max_length=500)
+    extra_data: Optional[str] = None
 
 
 class UserActivityResponse(UserActivityCreate):
@@ -144,15 +171,14 @@ class UserActivityResponse(UserActivityCreate):
     user_id: int
     timestamp: datetime
 
-    class Config:
-        from_attributes = True
+    model_config = ConfigDict(from_attributes=True)
 
 
-# ============= RECOMMENDATION SCHEMAS =============
+# ============= RECOMMENDATION =============
 class ProjectRecommendation(BaseModel):
     project_id: int
     project_name: str
-    description: Optional[str]
+    description: Optional[str] = None
     similarity_score: float = Field(..., ge=0.0, le=1.0)
     reason: str
 
@@ -161,3 +187,14 @@ class RecommendationResponse(BaseModel):
     user_id: int
     recommendations: List[ProjectRecommendation]
     generated_at: datetime
+    source: str = Field(default="tfidf",
+                        description="Algorithm that produced the result")
+
+
+# ============= GENERIC =============
+class MessageResponse(BaseModel):
+    message: str
+
+
+class ErrorResponse(BaseModel):
+    detail: str

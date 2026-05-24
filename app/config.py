@@ -1,31 +1,51 @@
-from pydantic_settings import BaseSettings
-from typing import Optional
+from pydantic_settings import BaseSettings, SettingsConfigDict
+from typing import List
 
 
 class Settings(BaseSettings):
-    """Application configuration settings"""
+    """Application configuration loaded from environment / .env file."""
 
     # App
     app_name: str = "Project Management Microservice"
     app_version: str = "1.0.0"
     debug: bool = True
 
-    # Database
-    database_url: str = "postgresql+asyncpg://user:password@localhost:5432/project_management_db"
+    # Database — defaults to local SQLite so the service runs out of the box.
+    # For PostgreSQL set: postgresql+asyncpg://user:pass@host:5432/dbname
+    database_url: str = "sqlite+aiosqlite:///./project_management.db"
     sqlalchemy_echo: bool = False
 
-    # JWT/Security
-    secret_key: str = "your_super_secret_key_change_in_production"
+    # Security / JWT
+    secret_key: str = "change-me-in-production-please-use-a-long-random-string"
     algorithm: str = "HS256"
-    access_token_expire_minutes: int = 30
+    access_token_expire_minutes: int = 60 * 24  # 24 hours
 
     # Server
     host: str = "0.0.0.0"
     port: int = 8000
 
-    class Config:
-        env_file = ".env"
-        case_sensitive = False
+    # CORS — comma-separated list of allowed origins. "*" allows everything.
+    cors_origins: str = "*"
+
+    # URLs of sibling microservices (used by frontend / integration endpoints).
+    # Empty string means "not configured yet" — the UI will show a placeholder.
+    ingestion_service_url: str = ""
+    reports_service_url: str = ""
+    presentations_service_url: str = ""
+    diagrams_service_url: str = ""
+    chat_service_url: str = ""
+
+    model_config = SettingsConfigDict(
+        env_file=".env",
+        case_sensitive=False,
+        extra="ignore",
+    )
+
+    @property
+    def cors_origins_list(self) -> List[str]:
+        if self.cors_origins.strip() == "*":
+            return ["*"]
+        return [o.strip() for o in self.cors_origins.split(",") if o.strip()]
 
 
 settings = Settings()

@@ -1,122 +1,88 @@
-from typing import Optional
-from sqlalchemy.ext.asyncio import AsyncSession
+"""RBAC helpers used inside route handlers when permissions depend on resource state
+(e.g. only the team owner can edit the team)."""
 from sqlalchemy import select
-from app.models import User, Role, RoleEnum
-from fastapi import HTTPException, status
+from sqlalchemy.ext.asyncio import AsyncSession
+
+from app.models import (
+    ProjectMember,
+    Role,
+    RoleEnum,
+    Team,
+    TeamMember,
+    User,
+)
 
 
 class RBACService:
-    """Role-Based Access Control Service"""
 
     @staticmethod
-    async def check_user_role(
-        user_id: int,
-        required_roles: list[RoleEnum],
-        db: AsyncSession
-    ) -> bool:
-        """Check if user has one of the required roles"""
-        query = select(User).where(User.id == user_id)
-        result = await db.execute(query)
-        user = result.scalar_one_or_none()
-
-        if not user or not user.is_active:
-            return False
-
-        query = select(Role).where(Role.id == user.role_id)
-        result = await db.execute(query)
-        role = result.scalar_one_or_none()
-
-        if not role:
-            return False
-
-        return role.name in required_roles
-
-    @staticmethod
-    async def ensure_admin(user_id: int, db: AsyncSession):
-        """Ensure user is admin, raise exception otherwise"""
-        is_admin = await RBACService.check_user_role(
-            user_id,
-            [RoleEnum.ADMIN],
-            db
+    async def get_user_role_name(user_id: int, db: AsyncSession) -> str | None:
+        result = await db.execute(
+            select(Role.name)
+            .join(User, User.role_id == Role.id)
+            .where(User.id == user_id)
         )
-        if not is_admin:
-            raise HTTPException(
-                status_code=status.HTTP_403_FORBIDDEN,
-                detail="Only admins can perform this action"
-            )
+        return result.scalar_one_or_none()
 
     @staticmethod
-    async def ensure_manager_or_admin(user_id: int, db: AsyncSession):
-        """Ensure user is manager or admin"""
-        has_permission = await RBACService.check_user_role(
-            user_id,
-            [RoleEnum.ADMIN, RoleEnum.MANAGER],
-            db
-        )
-        if not has_permission:
-            raise HTTPException(
-                status_code=status.HTTP_403_FORBIDDEN,
-                detail="Only managers and admins can perform this action"
-            )
-
-    @staticmethod
-    async def verify_project_access(
+    async def user_has_role(
         user_id: int,
-        project_id: int,
+        allowed: list[RoleEnum | str],
         db: AsyncSession,
-        min_role: RoleEnum = RoleEnum.CONTRIBUTOR
     ) -> bool:
-        """Verify user has access to project"""
-        from app.models import ProjectMember
+        role_name = await RBACService.get_user_role_name(user_id, db)
+        if role_name is None:
+            return False
+        allowed_names = {r.value if isinstance(r, RoleEnum) else r for r in allowed}
+        return role_name in allowed_names
 
-        # Check if user is admin (admins can access everything)
-        is_admin = await RBACService.check_user_role(
-            user_id,
-            [RoleEnum.ADMIN],
-            db
-        )
-        if is_admin:
+    @staticmethod
+    async def is_admin(user_id: int, db: AsyncSession) -> bool:
+        return await RBACService.user_has_role(user_id, [RoleEnum.ADMIN], db)
+
+    @staticmethod
+    async def has_team_access(user_id: int, team_id: int, db: AsyncSession) -> bool:
+        """True if user is admin, team owner, or a team member."""
+        if await RBACService.is_admin(user_id, db):
             return True
 
-        # Check project membership
-        query = select(ProjectMember).where(
-            (ProjectMember.project_id == project_id) &
-            (ProjectMember.user_id == user_id)
-        )
-        result = await db.execute(query)
-        member = result.scalar_one_or_none()
+        team = (await db.execute(
+            select(Team).where(Team.id == team_id)
+        )).scalar_one_or_none()
+        if not team:
+            return False
+        if team.owner_id == user_id:
+            return True
 
+        member = (await db.execute(
+            select(TeamMember).where(
+                TeamMember.team_id == team_id,
+                TeamMember.user_id == user_id,
+            )
+        )).scalar_one_or_none()
         return member is not None
 
     @staticmethod
-    async def verify_team_access(
-        user_id: int,
-        team_id: int,
-        db: AsyncSession
-    ) -> bool:
-        """Verify user has access to team"""
-        from app.models import Team, TeamMember
-
-        # Check if user is admin
-        is_admin = await RBACService.check_user_role(
-            user_id,
-            [RoleEnum.ADMIN],
-            db
-        )
-        if is_admin:
+    async def has_project_access(user_id: int, project_id: int, db: AsyncSession) -> bool:
+        if await RBACService.is_admin(user_id, db):
             return True
+        member = (await db.execute(
+            select(ProjectMember).where(
+                ProjectMember.project_id == project_id,
+                ProjectMember.user_id == user_id,
+            )
+        )).scalar_one_or_none()
+        return member is not None
 
-        # Check if user is team member or owner
-        query = select(Team).where(
-            (Team.id == team_id) & (Team.owner_id == user_id)
-        )
-        result = await db.execute(query)
-        if result.scalar_one_or_none():
+    @staticmethod
+    async def is_project_admin(user_id: int, project_id: int, db: AsyncSession) -> bool:
+        """True if user is app-admin or has the 'admin' role on the project."""
+        if await RBACService.is_admin(user_id, db):
             return True
-
-        query = select(TeamMember).where(
-            (TeamMember.team_id == team_id) &
-            (TeamMember.user_id == user_id)
-        )
-        result = await db.execute(query)
-        return result.scalar_one_or_none() is not None
+        member = (await db.execute(
+            select(ProjectMember).where(
+                ProjectMember.project_id == project_id,
+                ProjectMember.user_id == user_id,
+            )
+        )).scalar_one_or_none()
+        return member is not None and member.role == "admin"

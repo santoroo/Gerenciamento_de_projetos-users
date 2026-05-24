@@ -1,213 +1,135 @@
-import numpy as np
-from sklearn.feature_extraction.text import TfidfVectorizer
-from sklearn.metrics.pairwise import cosine_similarity
-from sqlalchemy.ext.asyncio import AsyncSession
-from sqlalchemy import select, func, and_
+"""Content-based recommender (TF-IDF + cosine similarity).
+
+Designed to degrade gracefully: if the user has no activity, or scikit-learn
+fails for any reason, we fall back to popularity / random sampling so the
+endpoint never crashes the service."""
 from datetime import datetime, timedelta
-from app.models import UserActivity, Project, User
+from typing import List, Tuple
+
+from sqlalchemy import and_, select
+from sqlalchemy.ext.asyncio import AsyncSession
+
+from app.models import Project, ProjectMember, UserActivity
 from app.schemas import ProjectRecommendation, RecommendationResponse
-from typing import List
 
 
 class RecommendationService:
-    """AI-driven recommendation engine for projects"""
 
     @staticmethod
-    async def get_user_activity_profile(
-        user_id: int,
-        db: AsyncSession,
-        days: int = 90
-    ) -> dict:
-        """
-        Build user activity profile from recent activities
-        Returns tags and activity frequency
-        """
-        cutoff_date = datetime.utcnow() - timedelta(days=days)
-
-        query = select(UserActivity).where(
-            and_(
-                UserActivity.user_id == user_id,
-                UserActivity.timestamp >= cutoff_date
+    async def _user_activity_profile(user_id: int, db: AsyncSession, days: int = 90) -> dict:
+        cutoff = datetime.utcnow() - timedelta(days=days)
+        result = await db.execute(
+            select(UserActivity).where(
+                and_(UserActivity.user_id == user_id, UserActivity.timestamp >= cutoff)
             )
-        ).order_by(UserActivity.timestamp.desc())
-
-        result = await db.execute(query)
+        )
         activities = result.scalars().all()
 
-        # Aggregate tags from all activities
-        all_tags = []
-        activity_types = {}
+        tags: list[str] = []
+        types: dict[str, int] = {}
+        for a in activities:
+            if a.tags:
+                tags.extend(a.tags.split(","))
+            types[a.activity_type] = types.get(a.activity_type, 0) + 1
 
-        for activity in activities:
-            if activity.tags:
-                all_tags.extend(activity.tags.split(","))
-
-            activity_types[activity.activity_type] = activity_types.get(
-                activity.activity_type, 0) + 1
-
-        # Clean and normalize tags
-        all_tags = [tag.strip().lower() for tag in all_tags if tag.strip()]
-
+        tags = [t.strip().lower() for t in tags if t and t.strip()]
         return {
-            "tags": all_tags,
+            "tags": tags,
             "activity_count": len(activities),
-            "activity_types": activity_types,
-            "profile_text": " ".join(all_tags) if all_tags else "general"
+            "activity_types": types,
+            "profile_text": " ".join(tags) if tags else "",
         }
 
     @staticmethod
-    async def get_available_projects(
-        user_id: int,
-        db: AsyncSession,
-        exclude_existing: bool = True
-    ) -> List[dict]:
-        """Get projects available for recommendation"""
-        from app.models import ProjectMember
+    async def _available_projects(user_id: int, db: AsyncSession) -> List[dict]:
+        member_rows = (await db.execute(
+            select(ProjectMember.project_id).where(ProjectMember.user_id == user_id)
+        )).scalars().all()
+        member_ids = set(member_rows)
 
-        # Get projects user is already member of
-        user_project_ids = set()
-        if exclude_existing:
-            query = select(ProjectMember.project_id).where(
-                ProjectMember.user_id == user_id
-            )
-            result = await db.execute(query)
-            user_project_ids = set(result.scalars().all())
+        stmt = select(Project).where(Project.is_active == True)  # noqa: E712
+        if member_ids:
+            stmt = stmt.where(Project.id.notin_(member_ids))
 
-        # Get all active projects not already assigned
-        query = select(Project).where(
-            and_(
-                Project.is_active == True,
-                Project.id.notin_(
-                    user_project_ids) if user_project_ids else True
-            )
-        )
-
-        result = await db.execute(query)
-        projects = result.scalars().all()
-
+        projects = (await db.execute(stmt)).scalars().all()
         return [
             {
                 "id": p.id,
                 "name": p.name,
                 "description": p.description,
-                "tags": p.tags or "general",
-                "profile_text": f"{p.name} {p.description or ''} {p.tags or ''}".lower()
+                "tags": p.tags or "",
+                "profile_text": f"{p.name} {p.description or ''} {p.tags or ''}".lower(),
             }
             for p in projects
         ]
 
     @staticmethod
-    async def compute_content_based_recommendations(
-        user_profile: dict,
+    def _compute_scores(
+        user_profile_text: str,
         projects: List[dict],
-        top_k: int = 5,
-        min_similarity: float = 0.1
-    ) -> List[tuple]:
-        """
-        Content-based filtering using TF-IDF and cosine similarity
-
-        Args:
-            user_profile: User's activity profile
-            projects: List of available projects
-            top_k: Number of recommendations to return
-            min_similarity: Minimum similarity threshold
-
-        Returns:
-            List of (project_dict, similarity_score) tuples
-        """
+        top_k: int,
+        min_similarity: float = 0.05,
+    ) -> List[Tuple[dict, float]]:
+        """TF-IDF + cosine sim. Returns [(project, score), ...] sorted desc."""
         if not projects:
             return []
-
-        # Prepare documents for vectorization
-        documents = [user_profile["profile_text"]] + \
-            [p["profile_text"] for p in projects]
+        if not user_profile_text.strip():
+            # No activity yet — return projects with neutral score so the user
+            # still sees something to interact with.
+            return [(p, 0.0) for p in projects[:top_k]]
 
         try:
-            # TF-IDF vectorization
-            vectorizer = TfidfVectorizer(
-                lowercase=True,
-                stop_words="english",
-                ngram_range=(1, 2),
-                max_features=100
-            )
-            tfidf_matrix = vectorizer.fit_transform(documents)
+            from sklearn.feature_extraction.text import TfidfVectorizer
+            from sklearn.metrics.pairwise import cosine_similarity
 
-            # Compute cosine similarity between user and projects
-            user_vector = tfidf_matrix[0]
-            project_vectors = tfidf_matrix[1:]
+            docs = [user_profile_text] + [p["profile_text"] for p in projects]
+            vec = TfidfVectorizer(lowercase=True, ngram_range=(1, 2), max_features=200)
+            mat = vec.fit_transform(docs)
+            sims = cosine_similarity(mat[0], mat[1:]).flatten()
 
-            similarities = cosine_similarity(
-                user_vector, project_vectors).flatten()
-
-            # Filter by minimum similarity and sort
-            recommendations = [
-                (projects[i], float(similarities[i]))
+            scored = [
+                (projects[i], float(sims[i]))
                 for i in range(len(projects))
-                if similarities[i] >= min_similarity
+                if sims[i] >= min_similarity
             ]
-
-            recommendations.sort(key=lambda x: x[1], reverse=True)
-            return recommendations[:top_k]
-
-        except Exception as e:
-            # Fallback: return random projects if vectorization fails
-            print(f"Error in recommendation computation: {str(e)}")
-            return [(p, 0.5) for p in projects[:top_k]]
+            scored.sort(key=lambda x: x[1], reverse=True)
+            return scored[:top_k] or [(p, 0.0) for p in projects[:top_k]]
+        except Exception as exc:  # noqa: BLE001
+            # Fallback so a broken numpy/sklearn install doesn't 500 the API.
+            import logging
+            logging.getLogger(__name__).warning("Recommender fallback engaged: %s", exc)
+            return [(p, 0.0) for p in projects[:top_k]]
 
     @staticmethod
     async def generate_recommendations(
         user_id: int,
         db: AsyncSession,
-        top_k: int = 5
+        top_k: int = 5,
     ) -> RecommendationResponse:
-        """
-        Generate project recommendations for a user
+        profile = await RecommendationService._user_activity_profile(user_id, db)
+        candidates = await RecommendationService._available_projects(user_id, db)
+        scored = RecommendationService._compute_scores(profile["profile_text"], candidates, top_k)
 
-        Main recommendation pipeline:
-        1. Build user activity profile
-        2. Get available projects
-        3. Compute content-based recommendations
-        4. Return ranked projects
-        """
-        # Step 1: Get user activity profile
-        user_profile = await RecommendationService.get_user_activity_profile(
-            user_id,
-            db,
-            days=90
-        )
-
-        # Step 2: Get available projects
-        available_projects = await RecommendationService.get_available_projects(
-            user_id,
-            db,
-            exclude_existing=True
-        )
-
-        # Step 3: Compute recommendations
-        scored_projects = await RecommendationService.compute_content_based_recommendations(
-            user_profile,
-            available_projects,
-            top_k=top_k,
-            min_similarity=0.1
-        )
-
-        # Step 4: Build response
-        recommendations = []
-        for project, score in scored_projects:
-            reason = f"Matches your interests in: {', '.join(set(user_profile['tags'][:3]))}"
-
+        recommendations: list[ProjectRecommendation] = []
+        top_user_tags = list(dict.fromkeys(profile["tags"]))[:3]  # unique, ordered
+        for project, score in scored:
+            if top_user_tags and score > 0:
+                reason = f"Aligned with your recent interests: {', '.join(top_user_tags)}"
+            else:
+                reason = "Suggested because you haven't recorded activity yet"
             recommendations.append(
                 ProjectRecommendation(
                     project_id=project["id"],
                     project_name=project["name"],
                     description=project["description"],
-                    similarity_score=score,
-                    reason=reason
+                    similarity_score=max(0.0, min(1.0, score)),
+                    reason=reason,
                 )
             )
 
         return RecommendationResponse(
             user_id=user_id,
             recommendations=recommendations,
-            generated_at=datetime.utcnow()
+            generated_at=datetime.utcnow(),
+            source="tfidf",
         )

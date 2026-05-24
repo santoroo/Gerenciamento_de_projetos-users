@@ -1,325 +1,233 @@
-from fastapi import APIRouter, Depends, HTTPException, status
+"""Project management endpoints."""
+from fastapi import APIRouter, Depends, HTTPException, Query, status
+from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
-from sqlalchemy import select, and_
-from app.database import AsyncSessionLocal
-from app.models import Project, ProjectMember, Team, User, TeamMember
-from app.schemas import ProjectCreate, ProjectResponse, ProjectUpdate
+from sqlalchemy.orm import selectinload
+
+from app.database import get_db
+from app.models import PROJECT_MEMBER_ROLES, Project, ProjectMember, Team, User
+from app.schemas import (
+    MessageResponse,
+    ProjectCreate,
+    ProjectResponse,
+    ProjectUpdate,
+)
 from app.services.rbac import RBACService
+from app.utils.dependencies import get_current_user, require_manager_or_admin
 
 router = APIRouter(prefix="/api/projects", tags=["projects"])
 
 
-async def get_db():
-    async with AsyncSessionLocal() as session:
-        yield session
+def _project_to_response(project: Project) -> dict:
+    return {
+        "id": project.id,
+        "name": project.name,
+        "description": project.description,
+        "tags": project.tags,
+        "team_id": project.team_id,
+        "owner_id": project.owner_id,
+        "is_active": project.is_active,
+        "created_at": project.created_at,
+        "updated_at": project.updated_at,
+        "members": [
+            {
+                "user_id": m.user_id,
+                "username": m.user.username if m.user else "",
+                "email": m.user.email if m.user else "",
+                "role": m.role,
+                "joined_at": m.joined_at,
+            }
+            for m in (project.members or [])
+        ],
+    }
 
 
 @router.post("/", response_model=ProjectResponse, status_code=status.HTTP_201_CREATED)
 async def create_project(
-    project_data: ProjectCreate,
-    owner_id: int,  # In production, from JWT
-    db: AsyncSession = Depends(get_db)
+    payload: ProjectCreate,
+    db: AsyncSession = Depends(get_db),
+    current_user: User = Depends(require_manager_or_admin),
 ):
-    """
-    Create a new project with team assignment
-
-    Complex RBAC Logic:
-    - Only Managers and Admins can create projects
-    - If team_id provided:
-        - User must be team owner or admin
-        - User will be added as project member
-    - Project owner will be added as project member
-
-    Tags are used for AI recommendations (comma-separated)
-    """
-    # 1. Verify user is manager or admin
-    await RBACService.ensure_manager_or_admin(owner_id, db)
-
-    # 2. Verify owner exists
-    query = select(User).where(User.id == owner_id)
-    result = await db.execute(query)
-    owner = result.scalar_one_or_none()
-    if not owner:
-        raise HTTPException(
-            status_code=status.HTTP_404_NOT_FOUND,
-            detail="Owner user not found"
-        )
-
-    # 3. If team specified, verify access and permissions
-    team = None
-    if project_data.team_id:
-        query = select(Team).where(Team.id == project_data.team_id)
-        result = await db.execute(query)
-        team = result.scalar_one_or_none()
-
+    """Create a project. Manager/admin only. Caller is the owner and becomes a project admin."""
+    if payload.team_id is not None:
+        team = (await db.execute(
+            select(Team).where(Team.id == payload.team_id)
+        )).scalar_one_or_none()
         if not team:
-            raise HTTPException(
-                status_code=status.HTTP_404_NOT_FOUND,
-                detail="Team not found"
-            )
+            raise HTTPException(status.HTTP_404_NOT_FOUND, "Team not found")
+        if not await RBACService.has_team_access(current_user.id, payload.team_id, db):
+            raise HTTPException(status.HTTP_403_FORBIDDEN, "You don't have access to this team")
 
-        # Verify user has access to assign team
-        has_team_access = await RBACService.verify_team_access(
-            owner_id,
-            project_data.team_id,
-            db
-        )
-        if not has_team_access:
-            raise HTTPException(
-                status_code=status.HTTP_403_FORBIDDEN,
-                detail="You don't have access to this team"
-            )
-
-    # 4. Create project
-    new_project = Project(
-        name=project_data.name,
-        description=project_data.description,
-        tags=project_data.tags,
-        team_id=project_data.team_id,
-        owner_id=owner_id
+    project = Project(
+        name=payload.name,
+        description=payload.description,
+        tags=payload.tags,
+        team_id=payload.team_id,
+        owner_id=current_user.id,
+        is_active=True,
     )
-
-    db.add(new_project)
+    db.add(project)
     await db.commit()
-    await db.refresh(new_project)
+    await db.refresh(project)
 
-    # 5. Add owner as project member
-    owner_member = ProjectMember(
-        project_id=new_project.id,
-        user_id=owner_id,
-        role="admin"  # Owner has admin role on project
-    )
-    db.add(owner_member)
+    db.add(ProjectMember(project_id=project.id, user_id=current_user.id, role="admin"))
     await db.commit()
 
-    return new_project
+    full = (await db.execute(
+        select(Project).options(selectinload(Project.members).selectinload(ProjectMember.user))
+        .where(Project.id == project.id)
+    )).scalar_one()
+    return _project_to_response(full)
 
 
 @router.get("/", response_model=list[ProjectResponse])
 async def list_projects(
-    skip: int = 0,
-    limit: int = 100,
-    db: AsyncSession = Depends(get_db)
+    skip: int = Query(0, ge=0),
+    limit: int = Query(100, ge=1, le=500),
+    include_inactive: bool = False,
+    mine: bool = Query(False, description="Return only projects the current user belongs to"),
+    db: AsyncSession = Depends(get_db),
+    current_user: User = Depends(get_current_user),
 ):
-    """List all active projects"""
-    query = select(Project).where(
-        Project.is_active == True
-    ).offset(skip).limit(limit)
-    result = await db.execute(query)
-    return result.scalars().all()
+    stmt = select(Project).options(
+        selectinload(Project.members).selectinload(ProjectMember.user)
+    )
+    if not include_inactive:
+        stmt = stmt.where(Project.is_active == True)  # noqa: E712
+    if mine:
+        stmt = stmt.join(ProjectMember, ProjectMember.project_id == Project.id) \
+                   .where(ProjectMember.user_id == current_user.id)
+    stmt = stmt.offset(skip).limit(limit).order_by(Project.id)
+    result = await db.execute(stmt)
+    return [_project_to_response(p) for p in result.scalars().unique().all()]
 
 
 @router.get("/{project_id}", response_model=ProjectResponse)
 async def get_project(
     project_id: int,
-    db: AsyncSession = Depends(get_db)
+    db: AsyncSession = Depends(get_db),
+    _: User = Depends(get_current_user),
 ):
-    """Get project details with members"""
-    query = select(Project).where(Project.id == project_id)
-    result = await db.execute(query)
-    project = result.scalar_one_or_none()
-
+    project = (await db.execute(
+        select(Project).options(selectinload(Project.members).selectinload(ProjectMember.user))
+        .where(Project.id == project_id)
+    )).scalar_one_or_none()
     if not project:
-        raise HTTPException(
-            status_code=status.HTTP_404_NOT_FOUND,
-            detail="Project not found"
-        )
-
-    return project
+        raise HTTPException(status.HTTP_404_NOT_FOUND, "Project not found")
+    return _project_to_response(project)
 
 
 @router.put("/{project_id}", response_model=ProjectResponse)
 async def update_project(
     project_id: int,
-    project_data: ProjectUpdate,
-    current_user_id: int,  # In production, from JWT
-    db: AsyncSession = Depends(get_db)
+    payload: ProjectUpdate,
+    db: AsyncSession = Depends(get_db),
+    current_user: User = Depends(get_current_user),
 ):
-    """
-    Update project information
-
-    RBAC: Only project owner or admin can update
-    """
-    query = select(Project).where(Project.id == project_id)
-    result = await db.execute(query)
-    project = result.scalar_one_or_none()
-
+    project = (await db.execute(select(Project).where(Project.id == project_id))).scalar_one_or_none()
     if not project:
-        raise HTTPException(
-            status_code=status.HTTP_404_NOT_FOUND,
-            detail="Project not found"
-        )
+        raise HTTPException(status.HTTP_404_NOT_FOUND, "Project not found")
 
-    # Check authorization - must be project owner or admin in app
-    is_owner = project.owner_id == current_user_id
-    is_admin = await RBACService.check_user_role(
-        current_user_id,
-        ["admin"],
-        db
-    )
+    if not await RBACService.is_project_admin(current_user.id, project_id, db) \
+            and project.owner_id != current_user.id:
+        raise HTTPException(status.HTTP_403_FORBIDDEN, "Only project admins can update this project")
 
-    if not (is_owner or is_admin):
-        raise HTTPException(
-            status_code=status.HTTP_403_FORBIDDEN,
-            detail="Only project owner or admin can update this project"
-        )
+    data = payload.model_dump(exclude_unset=True)
+    if "team_id" in data and data["team_id"] is not None:
+        team = (await db.execute(select(Team).where(Team.id == data["team_id"]))).scalar_one_or_none()
+        if not team:
+            raise HTTPException(status.HTTP_404_NOT_FOUND, "Team not found")
 
-    # Update fields
-    update_data = project_data.dict(exclude_unset=True)
-    for field, value in update_data.items():
+    for field, value in data.items():
         setattr(project, field, value)
 
     await db.commit()
     await db.refresh(project)
+    full = (await db.execute(
+        select(Project).options(selectinload(Project.members).selectinload(ProjectMember.user))
+        .where(Project.id == project.id)
+    )).scalar_one()
+    return _project_to_response(full)
 
-    return project
+
+@router.delete("/{project_id}", status_code=status.HTTP_204_NO_CONTENT)
+async def archive_project(
+    project_id: int,
+    db: AsyncSession = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    project = (await db.execute(select(Project).where(Project.id == project_id))).scalar_one_or_none()
+    if not project:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, "Project not found")
+    if not await RBACService.is_project_admin(current_user.id, project_id, db) \
+            and project.owner_id != current_user.id:
+        raise HTTPException(status.HTTP_403_FORBIDDEN, "Only project admins can archive this project")
+    project.is_active = False
+    await db.commit()
 
 
-@router.post("/{project_id}/members/{user_id}", status_code=status.HTTP_201_CREATED)
+@router.post("/{project_id}/members/{user_id}", response_model=MessageResponse,
+             status_code=status.HTTP_201_CREATED)
 async def add_project_member(
     project_id: int,
     user_id: int,
-    role: str = "contributor",  # admin, editor, viewer, contributor
-    current_user_id: int = None,  # In production, from JWT
-    db: AsyncSession = Depends(get_db)
+    role: str = Query("contributor"),
+    db: AsyncSession = Depends(get_db),
+    current_user: User = Depends(get_current_user),
 ):
-    """
-    Add user to project with specific role
+    if role not in PROJECT_MEMBER_ROLES:
+        raise HTTPException(
+            status.HTTP_400_BAD_REQUEST,
+            f"Invalid role. Must be one of: {', '.join(PROJECT_MEMBER_ROLES)}",
+        )
 
-    RBAC Logic:
-    - Only project admin (owner) can add members
-    - Can assign roles: admin, editor, viewer, contributor
-    """
-    query = select(Project).where(Project.id == project_id)
-    result = await db.execute(query)
-    project = result.scalar_one_or_none()
-
+    project = (await db.execute(select(Project).where(Project.id == project_id))).scalar_one_or_none()
     if not project:
-        raise HTTPException(
-            status_code=status.HTTP_404_NOT_FOUND,
-            detail="Project not found"
-        )
+        raise HTTPException(status.HTTP_404_NOT_FOUND, "Project not found")
 
-    # Verify authorization - user must be project admin
-    query = select(ProjectMember).where(
-        and_(
+    if not await RBACService.is_project_admin(current_user.id, project_id, db):
+        raise HTTPException(status.HTTP_403_FORBIDDEN, "Only project admins can add members")
+
+    user = (await db.execute(select(User).where(User.id == user_id))).scalar_one_or_none()
+    if not user:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, "User not found")
+
+    existing = (await db.execute(
+        select(ProjectMember).where(
             ProjectMember.project_id == project_id,
-            ProjectMember.user_id == current_user_id
+            ProjectMember.user_id == user_id,
         )
-    )
-    result = await db.execute(query)
-    member = result.scalar_one_or_none()
+    )).scalar_one_or_none()
+    if existing:
+        raise HTTPException(status.HTTP_409_CONFLICT, "User is already a project member")
 
-    if not member or member.role != "admin":
-        # Check if user is app admin
-        is_app_admin = await RBACService.check_user_role(
-            current_user_id,
-            ["admin"],
-            db
-        )
-        if not is_app_admin:
-            raise HTTPException(
-                status_code=status.HTTP_403_FORBIDDEN,
-                detail="Only project admin or app admin can add members"
-            )
-
-    # Verify user exists
-    query = select(User).where(User.id == user_id)
-    result = await db.execute(query)
-    if not result.scalar_one_or_none():
-        raise HTTPException(
-            status_code=status.HTTP_404_NOT_FOUND,
-            detail="User not found"
-        )
-
-    # Check if already member
-    query = select(ProjectMember).where(
-        and_(
-            ProjectMember.project_id == project_id,
-            ProjectMember.user_id == user_id
-        )
-    )
-    result = await db.execute(query)
-    if result.scalar_one_or_none():
-        raise HTTPException(
-            status_code=status.HTTP_400_BAD_REQUEST,
-            detail="User is already a project member"
-        )
-
-    # Validate role
-    valid_roles = ["admin", "editor", "viewer", "contributor"]
-    if role not in valid_roles:
-        raise HTTPException(
-            status_code=status.HTTP_400_BAD_REQUEST,
-            detail=f"Invalid role. Must be one of: {', '.join(valid_roles)}"
-        )
-
-    # Add member
-    new_member = ProjectMember(
-        project_id=project_id,
-        user_id=user_id,
-        role=role
-    )
-    db.add(new_member)
+    db.add(ProjectMember(project_id=project_id, user_id=user_id, role=role))
     await db.commit()
-
-    return {"message": f"User added to project with role: {role}"}
+    return MessageResponse(message=f"User added to project with role: {role}")
 
 
 @router.delete("/{project_id}/members/{user_id}", status_code=status.HTTP_204_NO_CONTENT)
 async def remove_project_member(
     project_id: int,
     user_id: int,
-    current_user_id: int,
-    db: AsyncSession = Depends(get_db)
+    db: AsyncSession = Depends(get_db),
+    current_user: User = Depends(get_current_user),
 ):
-    """Remove user from project"""
-    query = select(Project).where(Project.id == project_id)
-    result = await db.execute(query)
-    project = result.scalar_one_or_none()
-
+    project = (await db.execute(select(Project).where(Project.id == project_id))).scalar_one_or_none()
     if not project:
-        raise HTTPException(
-            status_code=status.HTTP_404_NOT_FOUND,
-            detail="Project not found"
-        )
+        raise HTTPException(status.HTTP_404_NOT_FOUND, "Project not found")
 
-    # Verify authorization
-    query = select(ProjectMember).where(
-        and_(
+    if not await RBACService.is_project_admin(current_user.id, project_id, db):
+        raise HTTPException(status.HTTP_403_FORBIDDEN, "Only project admins can remove members")
+
+    member = (await db.execute(
+        select(ProjectMember).where(
             ProjectMember.project_id == project_id,
-            ProjectMember.user_id == current_user_id
+            ProjectMember.user_id == user_id,
         )
-    )
-    result = await db.execute(query)
-    requester = result.scalar_one_or_none()
-
-    if not requester or requester.role != "admin":
-        is_app_admin = await RBACService.check_user_role(
-            current_user_id,
-            ["admin"],
-            db
-        )
-        if not is_app_admin:
-            raise HTTPException(
-                status_code=status.HTTP_403_FORBIDDEN,
-                detail="Only project admin can remove members"
-            )
-
-    query = select(ProjectMember).where(
-        and_(
-            ProjectMember.project_id == project_id,
-            ProjectMember.user_id == user_id
-        )
-    )
-    result = await db.execute(query)
-    member = result.scalar_one_or_none()
-
+    )).scalar_one_or_none()
     if not member:
-        raise HTTPException(
-            status_code=status.HTTP_404_NOT_FOUND,
-            detail="Member not found in project"
-        )
+        raise HTTPException(status.HTTP_404_NOT_FOUND, "Member not found in project")
 
     await db.delete(member)
     await db.commit()
