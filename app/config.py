@@ -28,11 +28,11 @@ class Settings(BaseSettings):
     cors_origins: str = "*"
 
     # URLs of sibling microservices (used by frontend / integration endpoints).
-    # Empty string means "not configured yet" — the UI will show a placeholder.
-    ingestion_service_url: str = ""
-    reports_service_url: str = ""
+    # Empty string means "not configured yet" — the UI will show "em breve".
+    ingestion_service_url: str = "https://mod2eng.azurewebsites.net/"
+    reports_service_url: str = "https://moduloderelatorios.azurewebsites.net"
     presentations_service_url: str = ""
-    diagrams_service_url: str = ""
+    diagrams_service_url: str = "https://modulo5-interface-e-nuvem.azurewebsites.net/"
     chat_service_url: str = ""
 
     model_config = SettingsConfigDict(

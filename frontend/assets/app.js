@@ -94,6 +94,80 @@ async function getIntegration() {
 }
 
 /* ============================================================
+   platform navbar (cross-module navigation)
+   ============================================================ */
+const PLATFORM_MODULES = [
+  { key: "users",         label: "Projetos e Usuários", current: true },
+  { key: "ingestion",     label: "Ingestão de Dados" },
+  { key: "reports",       label: "Relatórios" },
+  { key: "presentations", label: "Apresentações" },
+  { key: "diagrams",      label: "Diagramas" },
+  { key: "chat",          label: "Chat IA" },
+];
+
+function renderPlatformNavbar() {
+  const u = auth.user;
+  const modulesContainer = el("div", { class: "platform-modules" });
+
+  for (const mod of PLATFORM_MODULES) {
+    if (mod.current) {
+      modulesContainer.appendChild(
+        el("span", { class: "platform-module active" }, mod.label)
+      );
+    } else {
+      modulesContainer.appendChild(
+        el("span", { class: "platform-module disabled", "data-module": mod.key },
+          mod.label, " ", el("span", { class: "soon" }, "...")
+        )
+      );
+    }
+  }
+
+  getIntegration().then((cfg) => {
+    for (const mod of PLATFORM_MODULES) {
+      if (mod.current) continue;
+      const url = cfg.modules?.[mod.key];
+      const placeholder = modulesContainer.querySelector(`[data-module="${mod.key}"]`);
+      if (!placeholder) continue;
+
+      if (url) {
+        const link = el("a", {
+          class: "platform-module",
+          href: "#",
+          onclick: (e) => {
+            e.preventDefault();
+            const dest = new URL(url);
+            if (auth.token) dest.searchParams.set("token", auth.token);
+            window.open(dest.toString(), "_blank", "noopener");
+          },
+        }, mod.label);
+        placeholder.replaceWith(link);
+      } else {
+        placeholder.innerHTML = "";
+        placeholder.appendChild(document.createTextNode(mod.label + " "));
+        placeholder.appendChild(el("span", { class: "soon" }, "em breve"));
+      }
+    }
+  });
+
+  return el("nav", { class: "platform-navbar" },
+    el("div", { class: "platform-navbar-inner" },
+      el("div", { class: "platform-brand" },
+        el("span", { class: "platform-logo" }, "PDI"),
+        el("span", { class: "platform-brand-text" }, "Documentação Inteligente"),
+      ),
+      el("div", { class: "platform-sep" }),
+      modulesContainer,
+      el("div", { class: "platform-user" },
+        el("div", { class: "avatar" }, initials(u?.full_name || u?.username)),
+        el("span", { class: "platform-username" }, u?.full_name || u?.username || ""),
+        el("button", { class: "btn", onclick: logout }, "Sair"),
+      ),
+    ),
+  );
+}
+
+/* ============================================================
    router
    ============================================================ */
 const routes = {};
@@ -166,6 +240,7 @@ window.addEventListener("hashchange", renderRoute);
    ============================================================ */
 function renderShell(content) {
   const u = auth.user;
+  const navbar = renderPlatformNavbar();
   const sidebar = el("aside", { class: "sidebar" },
     el("div", { class: "brand" },
       el("div", { class: "logo" }, "P"),
@@ -182,8 +257,6 @@ function renderShell(content) {
       auth.isAdmin() ? navLink("#/users", "Usuários", "🛡️") : null,
       navLink("#/profile", "Meu Perfil", "👤"),
     ),
-    el("div", { class: "nav-section" }, "Outros módulos"),
-    el("div", { class: "integrations", id: "integrations-list" }, loading()),
     el("div", { class: "sidebar-footer" },
       el("div", { class: "user" },
         el("div", { class: "avatar" }, initials(u?.full_name || u?.username)),
@@ -192,35 +265,11 @@ function renderShell(content) {
           el("small", { class: "muted" }, ptRole(u?.role?.name)),
         ),
       ),
-      el("button", { class: "btn btn-ghost btn-sm btn-block", onclick: logout }, "Sair"),
     ),
   );
   const main = el("main", {}, content);
   const shell = el("div", { class: "shell" }, sidebar, main);
-  // populate integrations async
-  getIntegration().then((cfg) => {
-    const list = $("#integrations-list");
-    if (!list) return;
-    list.innerHTML = "";
-    const labels = {
-      ingestion: "Ingestão",
-      reports: "Relatórios",
-      presentations: "Apresentações",
-      diagrams: "Diagramas",
-      chat: "Chat IA",
-    };
-    for (const [key, label] of Object.entries(labels)) {
-      const url = cfg.modules?.[key];
-      const enabled = !!url;
-      const link = el(enabled ? "a" : "div",
-        { class: `integration-link ${enabled ? "enabled" : "disabled"}`, href: enabled ? url : null, target: enabled ? "_blank" : null, rel: "noopener" },
-        el("span", {}, label),
-        el("span", { class: "status" }, enabled ? "↗" : "—"),
-      );
-      list.appendChild(link);
-    }
-  });
-  return shell;
+  return el("div", { class: "app-layout" }, navbar, shell);
 }
 
 function navLink(href, label, icon) {
