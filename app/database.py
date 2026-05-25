@@ -38,12 +38,63 @@ async def get_db():
 
 
 async def init_db():
-    """Create all tables. Safe to call at startup."""
-    # Ensure model classes are registered with Base.metadata before create_all.
+    """Create all tables and bootstrap default data. Safe to call at startup."""
     from app import models  # noqa: F401
 
     async with engine.begin() as conn:
         await conn.run_sync(Base.metadata.create_all)
+
+    await _bootstrap_defaults()
+
+
+async def _bootstrap_defaults():
+    """Ensure default roles exist and create admin user if no admin is present."""
+    import logging
+    from sqlalchemy import select, or_
+    from app.models import Role, RoleEnum, User
+    from app.utils.security import hash_password
+
+    logger = logging.getLogger("app.bootstrap")
+
+    async with AsyncSessionLocal() as session:
+        for name, desc in (
+            (RoleEnum.ADMIN.value, "Tech Lead / Arquiteto — acesso total"),
+            (RoleEnum.MANAGER.value, "Gerente de Projetos — gerencia equipes e projetos"),
+            (RoleEnum.CONTRIBUTOR.value, "Desenvolvedor — acesso limitado"),
+        ):
+            existing = (await session.execute(
+                select(Role).where(Role.name == name)
+            )).scalar_one_or_none()
+            if not existing:
+                session.add(Role(name=name, description=desc))
+                logger.info("Role criada: %s", name)
+        await session.commit()
+
+        admin_role = (await session.execute(
+            select(Role).where(Role.name == RoleEnum.ADMIN.value)
+        )).scalar_one()
+
+        has_admin = (await session.execute(
+            select(User).where(User.role_id == admin_role.id)
+        )).first()
+
+        if not has_admin:
+            conflict = (await session.execute(
+                select(User).where(
+                    or_(User.username == "admin_user", User.email == "admin@example.com")
+                )
+            )).scalar_one_or_none()
+            if not conflict:
+                session.add(User(
+                    username="admin_user",
+                    email="admin@example.com",
+                    full_name="Administrador",
+                    hashed_password=hash_password("password123"),
+                    role_id=admin_role.id,
+                    is_active=True,
+                ))
+                await session.commit()
+                logger.info("Admin padrão criado: admin_user / password123")
 
 
 async def drop_db():
