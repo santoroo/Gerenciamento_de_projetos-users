@@ -31,7 +31,7 @@ class Settings(BaseSettings):
     # Empty string means "not configured yet" — the UI will show "em breve".
     ingestion_service_url: str = "https://mod2eng.azurewebsites.net/"
     reports_service_url: str = "https://moduloderelatorios.azurewebsites.net"
-    presentations_service_url: str = ""
+    presentations_service_url: str = "https://modulo4-apresentacoes-v2.azurewebsites.net/"
     diagrams_service_url: str = "https://modulo5-interface-e-nuvem.azurewebsites.net/"
     chat_service_url: str = ""
 
