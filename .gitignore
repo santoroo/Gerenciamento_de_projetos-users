@@ -29,6 +29,7 @@ Thumbs.db
 
 # Claude / tooling
 .claude/
+CLAUDE.md
 
 # Logs
 *.log
