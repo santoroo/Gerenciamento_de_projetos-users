@@ -440,7 +440,7 @@ route("/dashboard", async () => {
       ? el("div", { class: "grid" }, ...recentProjects.map(projectCard))
       : emptyState("Nenhum projeto",
           "Crie um projeto para começar.",
-          auth.isManager() ? el("button", { class: "btn btn-primary", onclick: () => window.location.hash = "#/projects" }, "Ir para Projetos") : null),
+          el("button", { class: "btn btn-primary", onclick: () => window.location.hash = "#/projects" }, "Ir para Projetos")),
   );
 });
 
@@ -495,13 +495,15 @@ route("/projects", async () => {
 
   const header = el("div", { class: "page-header" },
     el("div", { class: "title" }, el("h1", {}, "Projetos")),
-    auth.isManager()
-      ? el("button", { class: "btn btn-primary", onclick: openCreateProjectModal }, "+ Novo projeto")
-      : null,
+    el("button", { class: "btn btn-primary", onclick: openCreateProjectModal }, "+ Novo projeto"),
   );
 
   if (!projects.length) {
-    return el("div", {}, header, emptyState("Nenhum projeto", "Que tal criar o primeiro?"));
+    return el("div", {}, header, emptyState(
+      "Nenhum projeto",
+      "Que tal criar o primeiro?",
+      el("button", { class: "btn btn-primary", onclick: openCreateProjectModal }, "+ Novo projeto"),
+    ));
   }
 
   const rows = projects.map(p =>

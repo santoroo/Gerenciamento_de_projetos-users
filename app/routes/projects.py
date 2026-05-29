@@ -13,7 +13,7 @@ from app.schemas import (
     ProjectUpdate,
 )
 from app.services.rbac import RBACService
-from app.utils.dependencies import get_current_user, require_manager_or_admin
+from app.utils.dependencies import get_current_user
 
 router = APIRouter(prefix="/api/projects", tags=["projects"])
 
@@ -46,9 +46,11 @@ def _project_to_response(project: Project) -> dict:
 async def create_project(
     payload: ProjectCreate,
     db: AsyncSession = Depends(get_db),
-    current_user: User = Depends(require_manager_or_admin),
+    current_user: User = Depends(get_current_user),
 ):
-    """Create a project. Manager/admin only. Caller is the owner and becomes a project admin."""
+    """Create a project. Any authenticated user may create one; the caller becomes
+    the owner and is granted the 'admin' role on that project (self-service model).
+    Global team management stays restricted to manager/admin."""
     if payload.team_id is not None:
         team = (await db.execute(
             select(Team).where(Team.id == payload.team_id)
